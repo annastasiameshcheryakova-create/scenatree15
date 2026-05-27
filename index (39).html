@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebAR Gesture Control Robot</title>
+
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/donmccurdy/aframe-extras@v7.0.0/dist/aframe-extras.min.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.20.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.0.7/dist/handpose.min.js"></script>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: transparent;
+    }
+
+    body video {
+      width: 100vw !important;
+      height: 100vh !important;
+      object-fit: cover !important;
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      z-index: -1 !important;
+    }
+
+    .a-canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    #ui-overlay {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.75);
+      color: white;
+      padding: 15px;
+      font-family: sans-serif;
+      border-radius: 8px;
+      z-index: 9999;
+      pointer-events: none;
+    }
+    .status { color: #ffeb3b; font-weight: bold; }
+    .error-status { color: #ff4444; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <div id="ui-overlay">
+    <div>Статус ИИ: <span id="ai-status" class="status">Загрузка моделей...</span></div>
+    <div>Жест: <span id="gesture-detected" class="status">Нет</span></div>
+    <div>Анимация: <span id="current-anim" class="status">Idle</span></div>
+  </div>
+
+  <a-scene mindar-image="imageTargetSrc: hutao.mind; autoStart: true; uiLoading: yes; uiScanning: yes;" 
+           embedded color-space="sRGB" renderer="colorManagement: true, sortObjects: true" 
+           vr-mode-ui="enabled: false" device-orientation-permission-ui="enabled: false">
+    
+    <a-assets>
+      <a-asset-item id="robotModel" src="https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/RobotExpressive/RobotExpressive.glb"></a-asset-item>
+    </a-assets>
+
+    <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+
+    <a-entity mindar-image-target="targetIndex: 0">
+      <a-entity id="robot" 
+                gltf-model="#robotModel" 
+                position="0 -0.4 0" 
+                scale="0.3 0.3 0.3" 
+                rotation="0 0 0"
+                animation-mixer="clip: Idle; loop: repeat;">
+      </a-entity>
+    </a-entity>
+  </a-scene>
+
+  <script>
+    let handposeModel = null;
+    let videoElement = null;
+    let robotEl = document.getElementById('robot');
+    let aiStatus = document.getElementById('ai-status');
+    let gestureDetected = document.getElementById('gesture-detected');
+    let currentAnim = document.getElementById('current-anim');
+    let lastActiveGesture = "none";
+
+    function estimateCustomGesture(landmarks) {
+      const wrist = landmarks[0];
+
+      const getDist = (p1, p2) => Math.hypot(p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]);
+
+      const indexExtended  = getDist(wrist, landmarks[8])  > getDist(wrist, landmarks[6]);
+      const middleExtended = getDist(wrist, landmarks[12]) > getDist(wrist, landmarks[10]);
+      const ringExtended   = getDist(wrist, landmarks[16]) > getDist(wrist, landmarks[14]);
+      const pinkyExtended  = getDist(wrist, landmarks[20]) > getDist(wrist, landmarks[18]);
+      
+      const thumbExtended  = getDist(landmarks[4], landmarks[17]) > getDist(landmarks[2], landmarks[17]);
+
+      if (!indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+        if (thumbExtended) {
+          return "thumbs_up";
+        }
+        return "fist";
+      }
+
+      if (indexExtended && middleExtended && !ringExtended && !pinkyExtended) {
+        return "victory";
+      }
+
+      return "none";
+    }
+
+    document.querySelector('a-scene').addEventListener('arReady', async () => {
+      aiStatus.innerText = "Инициализация ИИ...";
+      
+      try {
+        videoElement = document.querySelector('video');
+        
+        handposeModel = await handpose.load();
+        
+        aiStatus.innerText = "Работает";
+        detectHand();
+      } catch (error) {
+        console.error("Ошибка ИИ:", error);
+        aiStatus.className = "error-status";
+        aiStatus.innerText = "Ошибка: " + error.message;
+      }
+    });
+
+    async function detectHand() {
+      if (!videoElement || !handposeModel) return;
+
+      try {
+        const predictions = await handposeModel.estimateHands(videoElement);
+
+        if (predictions.length > 0) {
+          const gestureName = estimateCustomGesture(predictions[0].landmarks);
+          handleGesture(gestureName);
+        } else {
+          handleGesture("none");
+        }
+      } catch (err) {
+        console.error("Ошибка детекции ладони:", err);
+      }
+
+      requestAnimationFrame(detectHand);
+    }
+
+    function handleGesture(gestureName) {
+      if (gestureName === lastActiveGesture) return;
+      
+      lastActiveGesture = gestureName;
+      gestureDetected.innerText = gestureName === "none" ? "Нет" : gestureName;
+
+      let targetAnim = "Idle";
+
+      switch(gestureName) {
+        case "thumbs_up":
+          targetAnim = "Jump";
+          break;
+        case "victory":
+          targetAnim = "Dance";
+          break;
+        case "fist":
+          targetAnim = "Punch";
+          break;
+        default:
+          targetAnim = "Idle";
+          break;
+      }
+
+      currentAnim.innerText = targetAnim;
+      if (robotEl) {
+        robotEl.setAttribute('animation-mixer', `clip: ${targetAnim}; loop: repeat;`);
+      }
+    }
+  </script>
+</body>
+</html>
